@@ -1,0 +1,33 @@
+{
+  "gomaxprocs": 4,
+  "db": {
+    "host": "oracle.example.internal",
+    "port": 1521,
+    "service": "FEEDSVC",
+    "user": "feedvalve",
+    "connectTimeoutMs": 10000,
+    "writers": 4,
+    "schemaFile": "schema.json",
+    "commitTimeoutMs": 10000
+  },
+  "receiver": {
+    "listenAddr": ":10830",
+    "socketBufferBytes": 655360,
+    "queueCapacity": 4096
+  },
+  "unpack": {
+    "workers": 2
+  },
+  "shards": {
+    "count": 4,
+    "queueCapacity": 4096,
+    "tokenCountsCapacity": 65536
+  },
+  "flush": {
+    "windowMs": 200,
+    "maxBatchSize": 1000,
+    "maxInFlightPerShard": 2,
+    "drainTimeoutMs": 10000,
+    "nonRateLimited": [6511, 6521, 6531, 6571]
+  }
+}

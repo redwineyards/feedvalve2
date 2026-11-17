@@ -1,0 +1,44 @@
+{
+  "destinations": [
+    {
+      "table": "ABC_TRADE_QUOTE",
+      "key": "ABC_TOKEN_NO",
+      "columns": [
+        { "column": "ABC_LST_TRD_PRC", "field": "lastTradedPrice", "type": "number" },
+        { "column": "ABC_LST_TRD_QTY", "field": "lastTradeQuantity", "type": "number" },
+        { "column": "ABC_LST_TRD_TM", "field": "lastTradeTime", "type": "date" },
+        { "column": "ABC_AVRG_TRD_PRC", "field": "averageTradePrice", "type": "number" },
+        { "column": "ABC_TOT_QTY_TRDD", "field": "volumeTradedToday", "type": "number" },
+        { "column": "ABC_INDCTR", "field": "netChangeIndicator", "type": "char" },
+        { "column": "ABC_CHNG_PRVS_CLS", "field": "netPriceChangeFromClosingPrice", "type": "number" },
+        { "column": "ABC_CLS_PRC", "field": "closingPrice", "type": "number" },
+        { "column": "ABC_OPN_PRC", "field": "openPrice", "type": "number" },
+        { "column": "ABC_HGH_PRC", "field": "highPrice", "type": "number" },
+        { "column": "ABC_LOW_PRC", "field": "lowPrice", "type": "number" },
+        { "column": "ABC_TOT_BID_QTY", "field": "totalBuyQuantity", "type": "number" },
+        { "column": "ABC_TOT_OFFR_QTY", "field": "totalSellQuantity", "type": "number" },
+        { "column": "ABC_BST1_BID_PRC", "field": "buyPrice1", "type": "number" },
+        { "column": "ABC_BST1_BID_QTY", "field": "buyQuantity1", "type": "number" },
+        { "column": "ABC_BST2_BID_PRC", "field": "buyPrice2", "type": "number" },
+        { "column": "ABC_BST2_BID_QTY", "field": "buyQuantity2", "type": "number" },
+        { "column": "ABC_BST3_BID_PRC", "field": "buyPrice3", "type": "number" },
+        { "column": "ABC_BST3_BID_QTY", "field": "buyQuantity3", "type": "number" },
+        { "column": "ABC_BST4_BID_PRC", "field": "buyPrice4", "type": "number" },
+        { "column": "ABC_BST4_BID_QTY", "field": "buyQuantity4", "type": "number" },
+        { "column": "ABC_BST5_BID_PRC", "field": "buyPrice5", "type": "number" },
+        { "column": "ABC_BST5_BID_QTY", "field": "buyQuantity5", "type": "number" },
+        { "column": "ABC_BST1_OFFR_PRC", "field": "sellPrice1", "type": "number" },
+        { "column": "ABC_BST1_OFFR_QTY", "field": "sellQuantity1", "type": "number" },
+        { "column": "ABC_BST2_OFFR_PRC", "field": "sellPrice2", "type": "number" },
+        { "column": "ABC_BST2_OFFR_QTY", "field": "sellQuantity2", "type": "number" },
+        { "column": "ABC_BST3_OFFR_PRC", "field": "sellPrice3", "type": "number" },
+        { "column": "ABC_BST3_OFFR_QTY", "field": "sellQuantity3", "type": "number" },
+        { "column": "ABC_BST4_OFFR_PRC", "field": "sellPrice4", "type": "number" },
+        { "column": "ABC_BST4_OFFR_QTY", "field": "sellQuantity4", "type": "number" },
+        { "column": "ABC_BST5_OFFR_PRC", "field": "sellPrice5", "type": "number" },
+        { "column": "ABC_BST5_OFFR_QTY", "field": "sellQuantity5", "type": "number" },
+        { "column": "ABC_LST_UPD_TM", "type": "sysdate" }
+      ]
+    }
+  ]
+}
