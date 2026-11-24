@@ -10,7 +10,7 @@
 // one datagram is kept, because one worker handles it start to finish. Order
 // across datagrams is restored downstream from the receiver's arrival stamp:
 // every Packet carries (Seq, Index), and the shard drops a packet older than
-// the latest it has applied for the same (token, transcode). That is safe
+// the latest it has applied for the same token. That is safe
 // because every transcode is a complete snapshot.
 //
 // Header resolution follows HLD §6.4. Nearly every message has BCAST_HEADER,

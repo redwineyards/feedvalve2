@@ -26,6 +26,14 @@ type Config struct {
 	Unpack     Unpack   `json:"unpack"`
 	Shards     Shards   `json:"shards"`
 	Flush      Flush    `json:"flush"`
+	Stats      Stats    `json:"stats"`
+}
+
+// Stats configures the operational counters (FR10).
+type Stats struct {
+	// IntervalMs is how often every stage's counters are logged while
+	// running; they are logged once more at shutdown.
+	IntervalMs int `json:"intervalMs"`
 }
 
 // Receiver configures the UDP socket and the queue it feeds.
@@ -47,11 +55,8 @@ type Unpack struct {
 // shard count fixes which shard owns each token (HLD ADR-002).
 type Shards struct {
 	Count int `json:"count"`
-	// QueueCapacity bounds each shard's queue. Each entry is about 550 bytes.
+	// QueueCapacity bounds each shard's queue. Each entry is about 390 bytes.
 	QueueCapacity int `json:"queueCapacity"`
-	// TokenCountsCapacity pre-sizes the per-(token, transcode) counter, so
-	// it does not grow on the packet path.
-	TokenCountsCapacity int `json:"tokenCountsCapacity"`
 }
 
 // Flush configures the flush epochs (HLD §7.3, ADR-018). Startup-only for now.
@@ -59,8 +64,7 @@ type Flush struct {
 	// WindowMs is W, the global tick: every W each shard writes out
 	// everything that went dirty since its last epoch.
 	WindowMs int `json:"windowMs"`
-	// MaxBatchSize caps the rows in one batch, i.e. one transaction, across
-	// all three destinations (NFR6).
+	// MaxBatchSize caps the rows in one batch, i.e. one transaction (NFR6).
 	MaxBatchSize int `json:"maxBatchSize"`
 	// MaxInFlightPerShard is how many of one shard's batches may commit at
 	// once. It limits concurrency, not how much an epoch writes.
@@ -69,7 +73,9 @@ type Flush struct {
 	DrainTimeoutMs int `json:"drainTimeoutMs"`
 	// NonRateLimited lists the transcodes whose merges flush every shard at
 	// once instead of waiting for the tick (HLD ADR-016). Everything else is
-	// rate-limited: coalesced and flushed every WindowMs.
+	// rate-limited: coalesced and flushed every WindowMs. The default is
+	// [7305]: a security master change is written at once. A list in the
+	// file replaces the default, and [] makes everything rate-limited.
 	NonRateLimited []int `json:"nonRateLimited"`
 }
 
@@ -83,10 +89,6 @@ type DB struct {
 	// Writers is the size of the writer pool, one Oracle session each; it is
 	// independent of the shard count (HLD ADR-005).
 	Writers int `json:"writers"`
-	// SchemaFile is the column-mapping file: the destination tables and
-	// which mirror field each column holds (see package schema). A relative
-	// path is taken from the config file's directory.
-	SchemaFile string `json:"schemaFile"`
 	// CommitTimeoutMs bounds one batch's transaction, so a hung commit
 	// cannot stall a writer or the shutdown drain.
 	CommitTimeoutMs int `json:"commitTimeoutMs"`
@@ -104,7 +106,6 @@ const (
 	defaultShards            = 4
 	maxShards                = 64
 	defaultShardQueueCap     = 4096
-	defaultTokenCountsCap    = 65536
 	defaultWriters           = 4
 	defaultCommitTimeoutMs   = 10000
 	maxWriters               = 64
@@ -114,6 +115,7 @@ const (
 	defaultMaxInFlight       = 2
 	maxMaxInFlight           = 64
 	defaultDrainTimeoutMs    = 10000
+	defaultStatsIntervalMs   = 60000
 	maxTranscode             = 65535
 )
 
@@ -132,8 +134,9 @@ func Load(path string) (*Config, error) {
 		DB:       DB{Port: defaultPort, ConnectTimeoutMs: defaultConnectTimeoutMs, Writers: defaultWriters, CommitTimeoutMs: defaultCommitTimeoutMs},
 		Receiver: Receiver{SocketBufferBytes: defaultSocketBufferBytes, QueueCapacity: defaultQueueCapacity},
 		Unpack:   Unpack{Workers: defaultWorkers},
-		Shards:   Shards{Count: defaultShards, QueueCapacity: defaultShardQueueCap, TokenCountsCapacity: defaultTokenCountsCap},
-		Flush:    Flush{WindowMs: defaultWindowMs, MaxBatchSize: defaultMaxBatchSize, MaxInFlightPerShard: defaultMaxInFlight, DrainTimeoutMs: defaultDrainTimeoutMs},
+		Shards:   Shards{Count: defaultShards, QueueCapacity: defaultShardQueueCap},
+		Flush:    Flush{WindowMs: defaultWindowMs, MaxBatchSize: defaultMaxBatchSize, MaxInFlightPerShard: defaultMaxInFlight, DrainTimeoutMs: defaultDrainTimeoutMs, NonRateLimited: []int{7305}},
+		Stats:    Stats{IntervalMs: defaultStatsIntervalMs},
 	}
 
 	// Logic.
@@ -180,9 +183,6 @@ func (c *Config) validate() error {
 	if c.DB.Writers < 1 || c.DB.Writers > maxWriters {
 		errs = append(errs, fmt.Errorf("db.writers must be 1..%d, got %d", maxWriters, c.DB.Writers))
 	}
-	if c.DB.SchemaFile == "" {
-		errs = append(errs, errors.New("db.schemaFile is required"))
-	}
 	if c.DB.CommitTimeoutMs <= 0 {
 		errs = append(errs, fmt.Errorf("db.commitTimeoutMs must be positive, got %d", c.DB.CommitTimeoutMs))
 	}
@@ -204,9 +204,6 @@ func (c *Config) validate() error {
 	if c.Shards.QueueCapacity <= 0 {
 		errs = append(errs, fmt.Errorf("shards.queueCapacity must be positive, got %d", c.Shards.QueueCapacity))
 	}
-	if c.Shards.TokenCountsCapacity <= 0 {
-		errs = append(errs, fmt.Errorf("shards.tokenCountsCapacity must be positive, got %d", c.Shards.TokenCountsCapacity))
-	}
 	if c.Flush.WindowMs <= 0 {
 		errs = append(errs, fmt.Errorf("flush.windowMs must be positive, got %d", c.Flush.WindowMs))
 	}
@@ -223,6 +220,9 @@ func (c *Config) validate() error {
 		if code < 0 || code > maxTranscode {
 			errs = append(errs, fmt.Errorf("flush.nonRateLimited codes must be 0..%d, got %d", maxTranscode, code))
 		}
+	}
+	if c.Stats.IntervalMs <= 0 {
+		errs = append(errs, fmt.Errorf("stats.intervalMs must be positive, got %d", c.Stats.IntervalMs))
 	}
 	return errors.Join(errs...)
 }

@@ -12,30 +12,13 @@ import (
 	"feedvalve/internal/app"
 )
 
-// writeConfig writes a config using the checked-in schema.json.template, so
-// startup also proves every field the template names is produced.
+// writeConfig writes a config whose database listens on dbPort.
 func writeConfig(t *testing.T, dbPort int) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "..", "schema.json.template"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return writeConfigSchema(t, dbPort, string(b))
-}
-
-// writeConfigSchema writes a config whose schema file holds schemaBody. The
-// config names it by a relative path, which resolves against the config's
-// own directory, wherever the test runs from.
-func writeConfigSchema(t *testing.T, dbPort int, schemaBody string) string {
-	t.Helper()
 	dir := t.TempDir()
-	sp := filepath.Join(dir, "schema.json")
-	if err := os.WriteFile(sp, []byte(schemaBody), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	body := fmt.Sprintf(`{
 		"gomaxprocs": 2,
-		"db": {"host": "127.0.0.1", "port": %d, "service": "svc", "user": "u", "connectTimeoutMs": 2000, "schemaFile": "schema.json"},
+		"db": {"host": "127.0.0.1", "port": %d, "service": "svc", "user": "u", "connectTimeoutMs": 2000},
 		"receiver": {"listenAddr": "127.0.0.1:0"}
 	}`, dbPort)
 	p := filepath.Join(dir, "config.json")
@@ -69,20 +52,6 @@ func TestRunStartupErrors(t *testing.T) {
 			cfgPath:  func(t *testing.T) string { return filepath.Join(t.TempDir(), "nope.json") },
 			password: "pw",
 			wantErr:  "config",
-		},
-		{
-			name:     "invalid schema file",
-			cfgPath:  func(t *testing.T) string { return writeConfigSchema(t, closedPort(t), `{"destinations": []}`) },
-			password: "pw",
-			wantErr:  "schema",
-		},
-		{
-			name: "schema field no transcode produces",
-			cfgPath: func(t *testing.T) string {
-				return writeConfigSchema(t, closedPort(t), `{"destinations": [{"table": "Q", "key": "TOKEN", "columns": [{"column": "P", "field": "lastTradePrice", "type": "number"}]}]}`)
-			},
-			password: "pw",
-			wantErr:  "lastTradePrice",
 		},
 		{
 			name:     "password not set",

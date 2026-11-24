@@ -1,38 +1,73 @@
-// Package mirror holds each shard's coalesced copy of the destination rows.
+// Package mirror holds each shard's coalesced copy of its rows, one entry per
+// token. An entry has two parts, each from its own transcode: the Quote
+// (7208, ABC_TRADE_QUOTE's market columns) and the Master (7305,
+// ABC_TRADE_QUOTE's range columns and GHI_CNT_MSTR).
 //
-// Its input is the Contribution: one update to one destination row, already
-// normalised by a transcode's mapper. The mirror knows nothing of table
-// schemas; a row is just numbered int64 columns, and a contribution says
-// which of them it sets. Where two transcodes set the same column, whichever
-// contribution reaches the shard last wins; there are no per-column stamps.
+// Its input is the Contribution: one record's part for one token. The mirror
+// keeps the latest of each part per token; a contribution older than the last
+// one applied to the same part of its token is dropped as stale.
 package mirror
 
-// MaxCols is the number of columns a destination row can have, one bit each
-// in Contribution.Mask.
-const MaxCols = 64
-
-// Contribution is one update to one destination row, passed by value on a
-// shard queue. It holds only scalars and fixed-size arrays (ADR-006), so it
-// never aliases a buffer a worker reuses. Values are canonical: scaled
-// integer prices, Unix-epoch seconds, flags as 0/1. Only the columns whose
-// bit is set in Mask are meaningful.
-type Contribution struct {
-	Seq     uint64 // arrival stamp of the datagram it came from
-	Index   uint16 // sub-packet position within that datagram
-	Record  uint16 // record position within the message
-	Code    uint16 // transcode; with Token, the key of the stale check
-	Dest    uint8  // destination table, 0..2 (HLD: exactly three)
-	General bool   // no token: goes to shard 0
-	Token   int32  // ignored when General
-	RowKey  int64  // the row within Dest
-	Mask    uint64 // bit i set: Cols[i] carries a value
-	Cols    [MaxCols]int64
+// Quote is the ABC_TRADE_QUOTE columns a 7208 record sets, as the exchange
+// sends them: prices in paise, times in seconds since 1980 (0 = no trade yet),
+// the net change indicator as its byte code, and the buy/sell totals rounded.
+// The one computed value is the percentage change from the closing price.
+type Quote struct {
+	LastTradedPrice    int64    // ABC_LST_TRD_PRC
+	LastTradeQuantity  int64    // ABC_LST_TRD_QTY
+	LastTradeTime      int64    // ABC_LST_TRD_TM
+	AverageTradePrice  int64    // ABC_AVRG_TRD_PRC
+	VolumeTradedToday  int64    // ABC_TOT_QTY_TRDD
+	NetChangeIndicator int64    // ABC_INDCTR
+	PctChangePrevClose int64    // ABC_CHNG_PRVS_CLS: % change from ClosingPrice, in hundredths of a percent; 0 if no close
+	ClosingPrice       int64    // ABC_CLS_PRC
+	OpenPrice          int64    // ABC_OPN_PRC
+	HighPrice          int64    // ABC_HGH_PRC
+	LowPrice           int64    // ABC_LOW_PRC
+	TotalBuyQuantity   int64    // ABC_TOT_BID_QTY
+	TotalSellQuantity  int64    // ABC_TOT_OFFR_QTY
+	BuyPrice           [5]int64 // ABC_BSTn_BID_PRC, best first
+	BuyQuantity        [5]int64 // ABC_BSTn_BID_QTY
+	SellPrice          [5]int64 // ABC_BSTn_OFFR_PRC
+	SellQuantity       [5]int64 // ABC_BSTn_OFFR_QTY
 }
 
-// Set stores v in column col and marks the column as set.
-func (c *Contribution) Set(col int, v int64) {
-	c.Cols[col] = v
-	c.Mask |= 1 << col
+// Master is the columns a 7305 record sets, as the exchange sends them:
+// prices in paise, the delete flag as its byte code, the remark as raw
+// blank-padded bytes.
+type Master struct {
+	HighPriceRange     int64    // ABC_HGH_PRC_RNG
+	LowPriceRange      int64    // ABC_LOW_PRC_RNG
+	BasePrice          int64    // ABC_BASE_PRC and GHI_BASE_PRICE
+	Multiplier         int64    // ABC_MULTPLR, NUMBER(5)
+	MinimumLotQuantity int64    // GHI_MIN_LOT_QTY
+	BoardLotQuantity   int64    // GHI_BOARD_LOT_QTY
+	TickSize           int64    // GHI_TCK_SZ
+	FreezeQuantity     int64    // GHI_FREEZE_QTY
+	DeleteFlag         int64    // GHI_RECORD_DELETE_FLG: 'N' active, 'Y' deleted
+	Remark             [25]byte // GHI_REMARKS, CHAR(25)
+}
+
+// Part says which part of a token's entry a contribution sets.
+type Part uint8
+
+const (
+	PartQuote  Part = iota // Quote, from 7208
+	PartMaster             // Master, from 7305
+)
+
+// Contribution is one update to one token's row, passed by value on a shard
+// queue. It holds only scalars and fixed-size arrays (ADR-006), so it never
+// aliases a buffer a worker reuses.
+type Contribution struct {
+	Seq    uint64 // arrival stamp of the datagram it came from
+	Index  uint16 // sub-packet position within that datagram
+	Record uint16 // record position within the message
+	Code   uint16 // transcode
+	Token  int32  // the row: ABC_TOKEN_NO, GHI_TOKEN_NO
+	Part   Part   // which of Quote and Master carries the values
+	Quote  Quote  // the values, when Part is PartQuote
+	Master Master // the values, when Part is PartMaster
 }
 
 // Stamp packs the contribution's arrival position into one number that

@@ -7,7 +7,6 @@
     "user": "feedvalve",
     "connectTimeoutMs": 10000,
     "writers": 4,
-    "schemaFile": "schema.json",
     "commitTimeoutMs": 10000
   },
   "receiver": {
@@ -20,14 +19,16 @@
   },
   "shards": {
     "count": 4,
-    "queueCapacity": 4096,
-    "tokenCountsCapacity": 65536
+    "queueCapacity": 4096
   },
   "flush": {
     "windowMs": 200,
     "maxBatchSize": 1000,
     "maxInFlightPerShard": 2,
     "drainTimeoutMs": 10000,
-    "nonRateLimited": [6511, 6521, 6531, 6571]
+    "nonRateLimited": [7305]
+  },
+  "stats": {
+    "intervalMs": 60000
   }
 }

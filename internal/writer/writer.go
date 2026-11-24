@@ -16,9 +16,8 @@ import (
 	"feedvalve/internal/mirror"
 )
 
-// Commit writes one batch as one transaction, destination 0 first, and
-// reports whether it committed. The SQL is not written yet: it needs the
-// destination table DDLs.
+// Commit writes one batch as one transaction and reports whether it
+// committed. db.NewCommit makes the real one.
 type Commit func(b *mirror.Batch) error
 
 // Stats counts what the writers have done. Safe to read concurrently.

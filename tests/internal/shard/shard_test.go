@@ -71,17 +71,14 @@ func startWith(t *testing.T, maxBatch, maxInFlight int, drain time.Duration, o o
 	return h
 }
 
-// put dirties row key of destination 0 from the rate-limited 7208, with
-// column 0 = v.
+// put dirties row key from the rate-limited 7208, with last traded price v.
 func (h *harness) put(seq uint64, key, v int64) {
 	h.putCode(seq, 7208, key, v)
 }
 
 // putCode is put from transcode code.
 func (h *harness) putCode(seq uint64, code uint16, key, v int64) {
-	c := mirror.Contribution{Seq: seq, Code: code, Dest: 0, RowKey: key}
-	c.Set(0, v)
-	h.in <- c
+	h.in <- mirror.Contribution{Seq: seq, Code: code, Token: int32(key), Quote: mirror.Quote{LastTradedPrice: v}}
 }
 
 // take returns the next batch the shard sends.
@@ -126,7 +123,7 @@ func (h *harness) waitExit(t *testing.T) {
 func rowKeys(b *mirror.Batch) []int64 {
 	var keys []int64
 	for _, r := range b.Rows {
-		keys = append(keys, r.Key)
+		keys = append(keys, int64(r.Token))
 	}
 	return keys
 }

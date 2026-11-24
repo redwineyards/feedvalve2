@@ -14,7 +14,7 @@ import (
 func batch(shard, n int) *mirror.Batch {
 	b := mirror.NewBatch(shard, n)
 	for i := range n {
-		b.Rows = append(b.Rows, mirror.BatchRow{Key: int64(i)})
+		b.Rows = append(b.Rows, mirror.BatchRow{Token: int32(i)})
 	}
 	return b
 }

@@ -15,11 +15,11 @@ func apply(m *mirror.Mirror, cs ...mirror.Contribution) {
 	}
 }
 
-// keys lists the (dest, key) of every row in b, in batch order.
-func keys(b *mirror.Batch) [][2]int64 {
-	var got [][2]int64
+// tokens lists the token of every row in b, in batch order.
+func tokens(b *mirror.Batch) []int32 {
+	var got []int32
 	for _, r := range b.Rows {
-		got = append(got, [2]int64{int64(r.Dest), r.Key})
+		got = append(got, r.Token)
 	}
 	return got
 }
@@ -29,23 +29,17 @@ func TestOpenEpochNothingDirty(t *testing.T) {
 	if m.OpenEpoch() {
 		t.Error("OpenEpoch on an empty mirror = true, want false")
 	}
-	apply(m, contrib(1, 7208, 0, 1, col(0, 1)))
+	apply(m, contrib(1, 7208, 1, 1))
 	flushAll(m)
 	if m.OpenEpoch() {
 		t.Error("OpenEpoch after everything was written = true, want false")
 	}
 }
 
-func TestFillBudgetSpansDestinations(t *testing.T) {
+func TestFillBudget(t *testing.T) {
 	m := mirror.New(new(mirror.Stats))
-	// Dirtied out of destination order on purpose: batches still go dest 0 first.
-	apply(m,
-		contrib(1, 7208, 1, 21, col(0, 1)),
-		contrib(2, 7208, 0, 11, col(0, 1)),
-		contrib(3, 7208, 0, 12, col(0, 1)),
-		contrib(4, 7208, 1, 22, col(0, 1)),
-		contrib(5, 7208, 0, 13, col(0, 1)),
-	)
+	apply(m, contrib(1, 7208, 21, 1), contrib(2, 7208, 11, 1), contrib(3, 7208, 12, 1),
+		contrib(4, 7208, 22, 1), contrib(5, 7208, 13, 1))
 	if !m.OpenEpoch() {
 		t.Fatal("OpenEpoch = false with 5 dirty rows")
 	}
@@ -54,8 +48,8 @@ func TestFillBudgetSpansDestinations(t *testing.T) {
 	}
 	b := mirror.NewBatch(3, 4)
 	m.Fill(b, 4)
-	if want := [][2]int64{{0, 11}, {0, 12}, {0, 13}, {1, 21}}; !reflect.DeepEqual(keys(b), want) {
-		t.Errorf("first batch = %v, want %v", keys(b), want)
+	if want := []int32{21, 11, 12, 22}; !reflect.DeepEqual(tokens(b), want) {
+		t.Errorf("first batch = %v, want %v", tokens(b), want)
 	}
 	if b.Shard != 3 {
 		t.Errorf("batch Shard = %d, want 3", b.Shard)
@@ -65,8 +59,8 @@ func TestFillBudgetSpansDestinations(t *testing.T) {
 	}
 	b2 := mirror.NewBatch(3, 4)
 	m.Fill(b2, 4)
-	if want := [][2]int64{{1, 22}}; !reflect.DeepEqual(keys(b2), want) {
-		t.Errorf("second batch = %v, want %v", keys(b2), want)
+	if want := []int32{13}; !reflect.DeepEqual(tokens(b2), want) {
+		t.Errorf("second batch = %v, want %v", tokens(b2), want)
 	}
 	if n := m.Cohort(); n != 0 {
 		t.Errorf("Cohort() after second batch = %d, want 0", n)
@@ -76,45 +70,45 @@ func TestFillBudgetSpansDestinations(t *testing.T) {
 func TestEpochMergesDuringFlush(t *testing.T) {
 	t.Run("row dirtied mid-epoch waits for the next epoch", func(t *testing.T) {
 		m := mirror.New(new(mirror.Stats))
-		apply(m, contrib(1, 7208, 0, 1, col(0, 1)))
+		apply(m, contrib(1, 7208, 1, 1))
 		m.OpenEpoch()
-		apply(m, contrib(2, 7208, 0, 2, col(0, 2)))
+		apply(m, contrib(2, 7208, 2, 2))
 		if c, d := m.Cohort(), m.Dirty(); c != 1 || d != 1 {
 			t.Fatalf("(Cohort, Dirty) = (%d, %d), want (1, 1)", c, d)
 		}
 		b := mirror.NewBatch(0, 10)
 		m.Fill(b, 10)
-		if want := [][2]int64{{0, 1}}; !reflect.DeepEqual(keys(b), want) {
-			t.Errorf("epoch carried %v, want only %v", keys(b), want)
+		if want := []int32{1}; !reflect.DeepEqual(tokens(b), want) {
+			t.Errorf("epoch carried %v, want only %v", tokens(b), want)
 		}
 		m.Complete(b)
-		if got := drainAll(m, 0); len(got) != 1 || got[0].key != 2 {
+		if got := flushAll(m); len(got) != 1 || got[0].token != 2 {
 			t.Errorf("next epoch carried %+v, want row 2", got)
 		}
 	})
 
 	t.Run("cohort row merged before batching goes out once, newest", func(t *testing.T) {
 		m := mirror.New(new(mirror.Stats))
-		apply(m, contrib(1, 7208, 0, 1, col(0, 1)))
+		apply(m, contrib(1, 7208, 1, 1))
 		m.OpenEpoch()
-		apply(m, contrib(2, 7208, 0, 1, col(0, 9)))
+		apply(m, contrib(2, 7208, 1, 9))
 		b := mirror.NewBatch(0, 10)
 		m.Fill(b, 10)
-		if len(b.Rows) != 1 || b.Rows[0].Row.Cols[0] != 9 || m.Dirty() != 0 {
-			t.Errorf("batch %+v, Dirty %d; want one row with the newest value and nothing left dirty", keys(b), m.Dirty())
+		if len(b.Rows) != 1 || b.Rows[0].Quote.LastTradedPrice != 9 || m.Dirty() != 0 {
+			t.Errorf("batch %v, Dirty %d; want one row with the newest value and nothing left dirty", tokens(b), m.Dirty())
 		}
 	})
 
 	t.Run("batch is a copy and an in-flight row is not batched twice", func(t *testing.T) {
 		m := mirror.New(new(mirror.Stats))
-		apply(m, contrib(1, 7208, 0, 1, col(0, 1)))
+		apply(m, contrib(1, 7208, 1, 1))
 		m.OpenEpoch()
 		b := mirror.NewBatch(0, 10)
 		m.Fill(b, 10)
 
-		apply(m, contrib(2, 7208, 0, 1, col(0, 2)))
-		if b.Rows[0].Row.Cols[0] != 1 {
-			t.Errorf("batch row changed to %d after a merge, want the batched 1", b.Rows[0].Row.Cols[0])
+		apply(m, contrib(2, 7208, 1, 2))
+		if v := b.Rows[0].Quote.LastTradedPrice; v != 1 {
+			t.Errorf("batch row changed to %d after a merge, want the batched 1", v)
 		}
 		if d := m.Dirty(); d != 0 {
 			t.Errorf("Dirty() = %d while the row is in flight, want 0", d)
@@ -127,7 +121,7 @@ func TestEpochMergesDuringFlush(t *testing.T) {
 		if d := m.Dirty(); d != 1 {
 			t.Fatalf("Dirty() after completion = %d, want the re-merged row back", d)
 		}
-		if got := drainAll(m, 0); len(got) != 1 || got[0].cols[0] != 2 {
+		if got := flushAll(m); len(got) != 1 || got[0].ltp != 2 {
 			t.Errorf("next epoch carried %+v, want row 1 with value 2", got)
 		}
 	})
@@ -136,29 +130,22 @@ func TestEpochMergesDuringFlush(t *testing.T) {
 func TestCompleteFailureRequeuesAtHead(t *testing.T) {
 	st := new(mirror.Stats)
 	m := mirror.New(st)
-	apply(m, contrib(1, 7208, 0, 1, col(0, 1)), contrib(2, 7208, 0, 2, col(0, 2)))
+	apply(m, contrib(1, 7208, 1, 1), contrib(2, 7208, 2, 2))
 	m.OpenEpoch()
 	b := mirror.NewBatch(0, 10)
 	m.Fill(b, 10)
 
-	apply(m, contrib(3, 7208, 0, 3, col(0, 3))) // dirtied during the epoch
-	apply(m, contrib(4, 7208, 0, 2, col(0, 4))) // re-merged while in flight
+	apply(m, contrib(3, 7208, 3, 3)) // dirtied during the epoch
+	apply(m, contrib(4, 7208, 2, 4)) // re-merged while in flight
 	b.Err = errors.New("commit failed")
 	m.Complete(b)
 
 	if n := st.Requeued.Load(); n != 2 {
 		t.Errorf("Requeued = %d, want 2", n)
 	}
-	got := drainAll(m, 0)
-	var order []int64
-	for _, r := range got {
-		order = append(order, r.key)
-	}
-	if want := []int64{1, 2, 3}; !reflect.DeepEqual(order, want) {
-		t.Errorf("next epoch order = %v, want %v (failed rows first, in batch order)", order, want)
-	}
-	if len(got) == 3 && got[1].cols[0] != 4 {
-		t.Errorf("row 2 = %d, want its newest value 4", got[1].cols[0])
+	want := []drained{{1, 1}, {2, 4}, {3, 3}}
+	if got := flushAll(m); !reflect.DeepEqual(got, want) {
+		t.Errorf("next epoch = %+v, want %+v (failed rows first, in batch order, newest values)", got, want)
 	}
 	if m.Dirty() != 0 {
 		t.Errorf("Dirty() = %d after the retry committed, want 0", m.Dirty())
@@ -167,27 +154,23 @@ func TestCompleteFailureRequeuesAtHead(t *testing.T) {
 
 func TestPending(t *testing.T) {
 	m := mirror.New(new(mirror.Stats))
-	apply(m,
-		contrib(1, 7208, 0, 1, col(0, 1)),
-		contrib(2, 7208, 0, 2, col(0, 1)),
-		contrib(3, 7208, 2, 1, col(0, 1)),
-	)
-	if got, want := m.Pending(), [mirror.Dests]int{2, 0, 1}; got != want {
-		t.Errorf("Pending() before the epoch = %v, want %v", got, want)
+	apply(m, contrib(1, 7208, 1, 1), contrib(2, 7208, 2, 1), contrib(3, 7208, 3, 1))
+	if got := m.Pending(); got != 3 {
+		t.Errorf("Pending() before the epoch = %d, want 3", got)
 	}
 	m.OpenEpoch()
 	b := mirror.NewBatch(0, 1)
-	m.Fill(b, 1)                                // row (0,1) in flight
-	apply(m, contrib(4, 7208, 1, 5, col(0, 1))) // dirtied mid-epoch
-	if got, want := m.Pending(), [mirror.Dests]int{1, 1, 1}; got != want {
-		t.Errorf("Pending() mid-epoch = %v, want %v (in-flight rows excluded)", got, want)
+	m.Fill(b, 1)                     // row 1 in flight
+	apply(m, contrib(4, 7208, 5, 1)) // dirtied mid-epoch
+	if got := m.Pending(); got != 3 {
+		t.Errorf("Pending() mid-epoch = %d, want 3 (in-flight rows excluded)", got)
 	}
 }
 
 // A steady-state epoch over existing rows must not allocate (ADR-006).
 func TestEpochAllocatesNothing(t *testing.T) {
 	m := mirror.New(new(mirror.Stats))
-	cs := []mirror.Contribution{contrib(1, 7208, 0, 1, col(0, 1)), contrib(1, 7208, 1, 1, col(0, 1)), contrib(1, 7208, 2, 1, col(0, 1))}
+	cs := []mirror.Contribution{contrib(1, 7208, 1, 1), contrib(1, 7208, 2, 1), contrib(1, 7208, 3, 1)}
 	b := mirror.NewBatch(0, 8)
 	run := func() {
 		for i := range cs {

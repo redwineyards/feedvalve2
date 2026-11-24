@@ -58,11 +58,12 @@ Fixed constraints (requirements §4, §7):
 
 *Distribute-then-coalesce*:
 - Decode runs **inline on the receive goroutine** (receiver → framing → lzo → header → decoders → policy/destinations → router), with no queue before the decoder.
-- The router hashes the token to a fixed set of **shard goroutines**. Each shard exclusively owns its partition of **three coalescing mirrors, one per destination table**, keyed by destination row.
-- A separately sized pool of **stateless writers** commits array-bound `MERGE` batches, one transaction across all three destinations in a fixed order.
-- **Two policy classes**: `rate-limited` (coalesce, flush on global tick `W`) and `non-rate-limited` (apply, then trigger an immediate flush of all shards). A flush is an **epoch**: it writes the entire dirty set. Rows dirtied during the flush go to the next epoch.
+- The router hashes the token to a fixed set of **shard goroutines**. Each shard exclusively owns its partition of **one coalescing mirror**, keyed by token. Each entry has a `Quote` part (7208) and a `Master` part (7305), with separate stale stamps (HLD §1.2 narrows the HLD's three mirrors to this).
+- A separately sized pool of **stateless writers** commits each batch as one transaction of up to three fixed, array-bound UPDATEs, run only for rows whose part changed: ABC_TRADE_QUOTE quote columns, then ABC_TRADE_QUOTE master columns, then GHI_CNT_MSTR. Rows are pre-loaded and never inserted.
+- **Two policy classes**: `rate-limited` (coalesce, flush on global tick `W`) and `non-rate-limited` (apply, then trigger an immediate flush of all shards). 7208 is rate-limited; 7305 is non-rate-limited (`flush.nonRateLimited` defaults to `[7305]`). A flush is an **epoch**: it writes the entire dirty set. Rows dirtied during the flush go to the next epoch.
 - Ordering (FR9) comes from single-writer arrival order. Header sequence comparison is a defence, not the mechanism.
-- Key invariants: `UpdateUnit` holds only scalars and fixed-size arrays, never slices, pointers or strings, because the receive buffers are reused. Every destination row a unit touches must belong to that unit's own shard.
+- Key invariants: `mirror.Contribution` (the HLD's `UpdateUnit`) holds only scalars and fixed-size arrays, never slices, pointers or strings, because the receive buffers are reused. A row belongs to the shard its token hashes to.
+- Tables and columns are written directly in Go (`mirror.Quote`/`Master`, `split.quoteOf`/`masterOf`, `db.updateSQL`/`abcMasterSQL`/`ghiSQL`); there is no runtime column-mapping file. A new table or transcode is a code change, made against its real DDL in `create_tables.sql`.
 - Three deliberate deviations from the requirements, stated in HLD §1.1:
   - "rate-limited" there means lossless coalescing, the opposite of the requirements glossary.
   - FR7 persists the latest occurrence applied, not every occurrence.

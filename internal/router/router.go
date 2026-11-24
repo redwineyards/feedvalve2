@@ -8,8 +8,7 @@
 //
 // The shard is chosen by token only (HLD ADR-002, ASM-15), so every transcode
 // for a token lands on one shard and the rows a token touches have a single
-// writer. Contributions without a token go to shard 0. The stale-drop check per
-// (token, transcode) happens later, inside the shard.
+// writer. The stale-drop check per token happens later, inside the shard.
 package router
 
 import (
@@ -17,7 +16,6 @@ import (
 	"sync/atomic"
 
 	"feedvalve/internal/mirror"
-	"feedvalve/internal/stats"
 	"feedvalve/internal/unpack"
 )
 
@@ -30,7 +28,7 @@ const errorCodeOff = 12
 //
 // It takes the Router rather than a send function on purpose: a pointer
 // passed through a function value escapes to the heap, which would allocate
-// every ~550-byte Contribution; a direct r.Send call lets it stay on the stack
+// every ~390-byte Contribution; a direct r.Send call lets it stay on the stack
 // (ADR-006).
 type Splitter func(p *unpack.Packet, r *Router)
 
@@ -46,14 +44,13 @@ type Stats struct {
 type Router struct {
 	splitters map[uint16]Splitter          // preprocessing per transcode
 	shards    []chan<- mirror.Contribution // one queue per shard
-	tokens    *stats.TokenCounts           // contributions per (token, transcode)
 	st        *Stats                       // the router's counters
 }
 
 // New returns a router that splits packets with splitters and sends contributions
 // to shards. Neither the map nor the slice may change afterwards.
-func New(splitters map[uint16]Splitter, shards []chan<- mirror.Contribution, tokens *stats.TokenCounts, st *Stats) *Router {
-	return &Router{splitters: splitters, shards: shards, tokens: tokens, st: st}
+func New(splitters map[uint16]Splitter, shards []chan<- mirror.Contribution, st *Stats) *Router {
+	return &Router{splitters: splitters, shards: shards, st: st}
 }
 
 // Route drops p if it is an error response or has no Splitter; otherwise it
@@ -79,18 +76,13 @@ func (r *Router) Route(p *unpack.Packet) {
 }
 
 // Send puts c on the queue of the shard that owns its token, blocking while
-// that queue is full, and counts it per (token, transcode).
+// that queue is full, and counts it.
 func (r *Router) Send(c *mirror.Contribution) {
 	var (
 		shard int // index of the owning shard
 	)
 
-	if c.General {
-		shard = 0
-	} else {
-		shard = int(mix(c.Token) % uint32(len(r.shards)))
-		r.tokens.Add(c.Token, c.Code)
-	}
+	shard = int(mix(c.Token) % uint32(len(r.shards)))
 	r.shards[shard] <- *c
 	r.st.Units.Add(1)
 }

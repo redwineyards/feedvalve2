@@ -173,6 +173,34 @@ the front because a reader must not discover any of them by accident halfway dow
 > it is a deviation from NFR1's wording and it was previously visible only as a parenthetical in two
 > traceability rows.
 
+### 1.2 The implementation narrows this design to typed, token-keyed rows
+
+Stakeholder decisions, 2026-11-24, made once the destination DDLs (`create_tables.sql`) were known.
+Read every passage below about three destinations, column masks or a declared destination schema
+with this note in mind:
+
+> **The code writes two token-keyed tables, `ABC_TRADE_QUOTE` and `GHI_CNT_MSTR`, from 7208 and
+> 7305.** `DEF_UND_MSTR` has no token and is out of scope for now. The shard holds **one** mirror
+> keyed by token, not three. Each entry has two typed parts, one per transcode:
+> - a `Quote` (7208 → ABC's market columns)
+> - a `Master` (7305 → ABC's range, base price and multiplier columns, and GHI's lot, tick, freeze,
+>   base price, delete flag and remark)
+>
+> A contribution carries one of these parts rather than a column mask over a value blob (§7.3).
+> ADR-006 still holds: everything is pointer-free. The stale guard (ADR-007) is kept per (row,
+> part), and each part comes from one transcode. A batch row flags which parts changed, and the
+> writer runs up to three fixed array-bound `UPDATE`s in one transaction: ABC quote, then ABC
+> master, then GHI. Rows are pre-loaded, and nothing is inserted.
+>
+> There is no runtime column-mapping file: a new table, column or transcode is a code change. The
+> ordering and deadlock arguments (§6.7, §8.4) are unaffected. A token is in at most one in-flight
+> batch, so two concurrent transactions never share an ABC or GHI row. A further destination is
+> added when it is actually needed, against its real DDL (YAGNI).
+>
+> **7305 is `non-rate-limited`.** This is a stakeholder decision, and it supersedes §6.9's
+> rate-limited classification of 7305/7340. Each merged 7305 triggers an immediate flush of every
+> shard (§6.8). 7208 stays `rate-limited`. `flush.nonRateLimited` defaults to `[7305]`.
+
 ---
 
 ## 2. Design goals, traced to requirement IDs

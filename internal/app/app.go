@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
 	"time"
 
@@ -23,10 +22,8 @@ import (
 	"feedvalve/internal/mirror"
 	"feedvalve/internal/receiver"
 	"feedvalve/internal/router"
-	"feedvalve/internal/schema"
 	"feedvalve/internal/shard"
 	"feedvalve/internal/split"
-	"feedvalve/internal/stats"
 	"feedvalve/internal/unpack"
 	"feedvalve/internal/writer"
 )
@@ -40,28 +37,70 @@ const PasswordEnv = "FEEDVALVE_DB_PASSWORD"
 // returned rather than exiting, so cleanup always runs (HLD §6.10).
 func Run(ctx context.Context, cfgPath string) error {
 	var (
-		cfg        *config.Config               // the loaded, validated config file
-		sch        *schema.Schema               // the column-mapping file: tables and mirror fields
-		schPath    string                       // where it is; relative paths are from the config's directory
+		cfg       *config.Config // the loaded, validated config file
+		password  string         // Oracle password, from the environment only
+		target    db.Target      // which Oracle instance to connect to
+		dbTimeout time.Duration  // how long the startup ping may take
+		conn      *sql.DB        // Oracle connection pool
+		err       error          // result of each startup step
+	)
+
+	// Config reads.
+	cfg, err = config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	password = os.Getenv(PasswordEnv)
+	target = db.Target{Host: cfg.DB.Host, Port: cfg.DB.Port, Service: cfg.DB.Service, User: cfg.DB.User}
+	dbTimeout = time.Duration(cfg.DB.ConnectTimeoutMs) * time.Millisecond
+
+	// Logic.
+	runtime.GOMAXPROCS(cfg.GOMAXPROCS)
+	if password == "" {
+		return errors.New(PasswordEnv + " is not set")
+	}
+	conn, err = db.Open(ctx, target, password, dbTimeout)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	slog.Info("oracle connected", "db", db.Describe(target))
+	return run(ctx, cfg, conn)
+}
+
+// RunWithDB is Run for a caller that brings its own database connection, such
+// as a test: it loads the config at cfgPath but neither reads the password nor
+// opens Oracle. conn stays the caller's to close.
+func RunWithDB(ctx context.Context, cfgPath string, conn *sql.DB) error {
+	var (
+		cfg *config.Config // the loaded, validated config file
+		err error          // result of loading it
+	)
+
+	// Config reads.
+	cfg, err = config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+
+	// Logic.
+	runtime.GOMAXPROCS(cfg.GOMAXPROCS)
+	return run(ctx, cfg, conn)
+}
+
+// run builds the pipeline over conn from cfg, binds the socket last, and runs
+// until ctx is cancelled or something fatal happens; on the way out it stops
+// every stage, upstream first, and logs the final counters.
+func run(ctx context.Context, cfg *config.Config, conn *sql.DB) error {
+	var (
 		commitTO   time.Duration                // bound on one batch's transaction
-		password   string                       // Oracle password, from the environment only
-		target     db.Target                    // which Oracle instance to connect to
-		dbTimeout  time.Duration                // how long the startup ping may take
 		workers    int                          // unpack pool size
 		shardCount int                          // number of shards
 		shardCap   int                          // capacity of each shard queue
-		conn       *sql.DB                      // Oracle connection pool
 		laddr      *net.UDPAddr                 // address to receive the feed on
 		sock       *net.UDPConn                 // the feed's UDP socket
 		queue      chan receiver.Datagram       // datagrams waiting for the unpack pool
-		st         receiver.Stats               // receive counters, logged on exit
-		ust        *unpack.Stats                // unpack counters; 512 KB, so not on the stack
-		rst        router.Stats                 // router counters
-		sst        split.Stats                  // splitter counters
-		mst        mirror.Stats                 // mirror counters, shared by every shard
-		shst       shard.Stats                  // epoch counters, shared by every shard
-		wst        writer.Stats                 // writer counters
-		dst        db.Stats                     // commit counters: tokens that matched no row
+		ctr        counters                     // every stage's counters, logged while running and at exit
 		writers    int                          // writer pool size
 		window     time.Duration                // W, the global flush tick
 		maxBatch   int                          // rows per batch
@@ -75,35 +114,19 @@ func Run(ctx context.Context, cfgPath string) error {
 		stopTick   chan struct{}                // closed to stop the ticker
 		writersOut chan struct{}                // receives once per writer when it has stopped
 		splitters  map[uint16]router.Splitter   // preprocessing per transcode
-		tokens     *stats.TokenCounts           // units per (token, transcode)
 		shardQs    []chan mirror.Contribution   // one queue per shard
 		shardSend  []chan<- mirror.Contribution // the same queues, send side, for the router
 		mirrors    []*mirror.Mirror             // one per shard, owned by its goroutine
 		rtr        *router.Router               // sends each message's units to their shards
 		poolDone   chan struct{}                // closed when the unpack pool has drained and stopped
 		shardsDone chan struct{}                // receives once per shard when it has drained its queue
+		statsEvery time.Duration                // how often the counters are logged while running
+		stopStats  chan struct{}                // closed to stop the periodic counters
+		statsDone  chan struct{}                // closed once the periodic counters have stopped
 		err        error                        // result of each startup step
 	)
 
 	// Config reads.
-	cfg, err = config.Load(cfgPath)
-	if err != nil {
-		return err
-	}
-	schPath = cfg.DB.SchemaFile
-	if !filepath.IsAbs(schPath) {
-		schPath = filepath.Join(filepath.Dir(cfgPath), schPath)
-	}
-	sch, err = schema.Load(schPath)
-	if err != nil {
-		return err
-	}
-	if err = checkFields(sch, split.OnlyMBPFields); err != nil {
-		return fmt.Errorf("schema %s: %w", schPath, err)
-	}
-	password = os.Getenv(PasswordEnv)
-	target = db.Target{Host: cfg.DB.Host, Port: cfg.DB.Port, Service: cfg.DB.Service, User: cfg.DB.User}
-	dbTimeout = time.Duration(cfg.DB.ConnectTimeoutMs) * time.Millisecond
 	workers = cfg.Unpack.Workers
 	shardCount = cfg.Shards.Count
 	shardCap = cfg.Shards.QueueCapacity
@@ -113,11 +136,11 @@ func Run(ctx context.Context, cfgPath string) error {
 	maxInFl = cfg.Flush.MaxInFlightPerShard
 	drain = time.Duration(cfg.Flush.DrainTimeoutMs) * time.Millisecond
 	commitTO = time.Duration(cfg.DB.CommitTimeoutMs) * time.Millisecond
+	statsEvery = time.Duration(cfg.Stats.IntervalMs) * time.Millisecond
 
 	// Allocations.
 	queue = make(chan receiver.Datagram, cfg.Receiver.QueueCapacity)
-	ust = new(unpack.Stats)
-	tokens = stats.NewTokenCounts(cfg.Shards.TokenCountsCapacity)
+	ctr.unpack = new(unpack.Stats)
 	shardQs = make([]chan mirror.Contribution, shardCount)
 	shardSend = make([]chan<- mirror.Contribution, shardCount)
 	for i := range shardQs {
@@ -126,7 +149,7 @@ func Run(ctx context.Context, cfgPath string) error {
 	}
 	mirrors = make([]*mirror.Mirror, shardCount)
 	for i := range mirrors {
-		mirrors[i] = mirror.New(&mst)
+		mirrors[i] = mirror.New(&ctr.mirror)
 	}
 	// batchQ holds every batch that exists, so a shard's send never fails
 	// (HLD §6.6 Q2); each done channel holds all of its shard's batches, so a
@@ -148,35 +171,26 @@ func Run(ctx context.Context, cfgPath string) error {
 	writersOut = make(chan struct{}, writers)
 	poolDone = make(chan struct{})
 	shardsDone = make(chan struct{}, shardCount)
+	stopStats = make(chan struct{})
+	statsDone = make(chan struct{})
 	splitters = map[uint16]router.Splitter{
-		7208: split.OnlyMBP(split.NewOnlyMBPMapper(sch), &sst),
+		7208: split.OnlyMBP(&ctr.split7208),
+		7305: split.SecurityUpdate(&ctr.split7305),
 	}
 
 	// Logic.
-	runtime.GOMAXPROCS(cfg.GOMAXPROCS)
-
-	if password == "" {
-		return errors.New(PasswordEnv + " is not set")
-	}
-	conn, err = db.Open(ctx, target, password, dbTimeout)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	slog.Info("oracle connected", "db", db.Describe(target))
-	for i, d := range sch.Dests {
-		slog.Info("destination", "dest", i, "table", d.Table, "key", d.Key, "columns", len(d.Columns))
-	}
+	// Each writer holds one session (ADR-005); the pool never opens more.
+	conn.SetMaxOpenConns(writers)
+	conn.SetMaxIdleConns(writers)
 
 	// Transcodes without a Splitter are counted as NoSplitter and dropped.
-	rtr = router.New(splitters, shardSend, tokens, &rst)
+	rtr = router.New(splitters, shardSend, &ctr.router)
 
 	// Writers first, then shards, then the tick (HLD §11.4). Every writer
-	// takes from the one batchQ, so they commit in parallel; each has its own
-	// schema-driven commit.
+	// takes from the one batchQ, so they commit in parallel.
 	for range writers {
 		go func() {
-			writer.Run(batchQ, done, db.NewCommit(conn, sch, commitTO, &dst), &wst)
+			writer.Run(batchQ, done, db.NewCommit(conn, commitTO, &ctr.db), &ctr.writer)
 			writersOut <- struct{}{}
 		}()
 	}
@@ -188,7 +202,7 @@ func Run(ctx context.Context, cfgPath string) error {
 			shard.Run(shard.Params{
 				ID: i, In: shardQs[i], Tick: ticks[i], Mirror: mirrors[i],
 				BatchQ: batchQ, Done: done[i],
-				MaxBatch: maxBatch, MaxInFlight: maxInFl, DrainTimeout: drain, Stats: &shst,
+				MaxBatch: maxBatch, MaxInFlight: maxInFl, DrainTimeout: drain, Stats: &ctr.shard,
 				Flush: flushReqs[i], FlushAll: flushReqs, NonRateLimited: nonRL,
 			})
 			shardsDone <- struct{}{}
@@ -197,7 +211,14 @@ func Run(ctx context.Context, cfgPath string) error {
 	go shard.Ticker(window, ticks, stopTick)
 	go func() {
 		defer close(poolDone)
-		unpack.Run(queue, workers, ust, rtr.Route)
+		unpack.Run(queue, workers, ctr.unpack, rtr.Route)
+	}()
+	// The counters are atomic, so logging them while the stages run is safe (FR10).
+	go func() {
+		defer close(statsDone)
+		every(statsEvery, stopStats, func() {
+			logStats(&ctr)
+		})
 	}()
 	// Whatever happens below, stop every stage before returning, upstream
 	// first: closing queue lets the pool drain it; once the pool has stopped
@@ -205,6 +226,8 @@ func Run(ctx context.Context, cfgPath string) error {
 	// shard makes its final flush; once the shards have stopped nothing sends
 	// batches, so the writers can be stopped.
 	defer func() {
+		close(stopStats)
+		<-statsDone
 		close(queue)
 		<-poolDone
 		for _, q := range shardQs {
@@ -218,7 +241,8 @@ func Run(ctx context.Context, cfgPath string) error {
 		for range writers {
 			<-writersOut
 		}
-		logStats(&st, ust, &rst, &sst, &mst, &shst, &wst, &dst, tokens)
+		slog.Info("pipeline stopped")
+		logStats(&ctr)
 	}()
 
 	laddr, err = net.ResolveUDPAddr("udp", cfg.Receiver.ListenAddr)
@@ -245,85 +269,96 @@ func Run(ctx context.Context, cfgPath string) error {
 		"windowMs", cfg.Flush.WindowMs,
 		"nonRateLimited", cfg.Flush.NonRateLimited)
 
-	return receiver.Run(ctx, sock, queue, &st)
+	return receiver.Run(ctx, sock, queue, &ctr.receiver)
 }
 
-// logStats logs the counters of every stage once the pipeline has stopped.
-func logStats(rst *receiver.Stats, ust *unpack.Stats, rtst *router.Stats, sst *split.Stats, mst *mirror.Stats, shst *shard.Stats, wst *writer.Stats, dst *db.Stats, tokens *stats.TokenCounts) {
+// every calls fn every interval until stop is closed.
+func every(interval time.Duration, stop <-chan struct{}, fn func()) {
+	var (
+		t *time.Ticker // the clock
+	)
+
+	t = time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			fn()
+		}
+	}
+}
+
+// counters holds every stage's counters. Each field is safe to read while the
+// stages run.
+type counters struct {
+	receiver  receiver.Stats // receive counters
+	unpack    *unpack.Stats  // unpack counters; 512 KB, so not on the stack
+	router    router.Stats   // router counters
+	split7208 split.Stats    // 7208 splitter counters
+	split7305 split.Stats    // 7305 splitter counters
+	mirror    mirror.Stats   // mirror counters, shared by every shard
+	shard     shard.Stats    // epoch counters, shared by every shard
+	writer    writer.Stats   // writer counters
+	db        db.Stats       // commit counters: tokens that matched no row
+}
+
+// logStats logs the counters of every stage, one line per stage.
+func logStats(c *counters) {
 	var (
 		perTC []any // transcode/count pairs for the log line
 	)
 
-	slog.Info("receiver stopped",
-		"received", rst.Received.Load(),
-		"oversize", rst.Oversize.Load())
-	slog.Info("unpack stopped",
-		"datagrams", ust.Datagrams.Load(),
-		"packets", ust.Packets.Load(),
-		"malformed", ust.Malformed.Load(),
-		"shortMessage", ust.ShortMessage.Load(),
-		"netIdMismatch", ust.NetIDMismatch.Load(),
-		"trailingBytes", ust.TrailingBytes.Load(),
-		"lzoInputOverrun", ust.LZOInputOverrun.Load(),
-		"lzoOutputOverrun", ust.LZOOutputOverrun.Load(),
-		"lzoLookbehindOverrun", ust.LZOLookbehindOverrun.Load(),
-		"lzoInputNotConsumed", ust.LZOInputNotConsumed.Load())
-	ust.Transcodes.Each(func(tc uint16, n uint64) {
+	slog.Info("receiver counters",
+		"received", c.receiver.Received.Load(),
+		"oversize", c.receiver.Oversize.Load())
+	slog.Info("unpack counters",
+		"datagrams", c.unpack.Datagrams.Load(),
+		"packets", c.unpack.Packets.Load(),
+		"malformed", c.unpack.Malformed.Load(),
+		"shortMessage", c.unpack.ShortMessage.Load(),
+		"netIdMismatch", c.unpack.NetIDMismatch.Load(),
+		"trailingBytes", c.unpack.TrailingBytes.Load(),
+		"lzoInputOverrun", c.unpack.LZOInputOverrun.Load(),
+		"lzoOutputOverrun", c.unpack.LZOOutputOverrun.Load(),
+		"lzoLookbehindOverrun", c.unpack.LZOLookbehindOverrun.Load(),
+		"lzoInputNotConsumed", c.unpack.LZOInputNotConsumed.Load())
+	c.unpack.Transcodes.Each(func(tc uint16, n uint64) {
 		perTC = append(perTC, fmt.Sprint(tc), n)
 	})
 	slog.Info("packets per transcode", perTC...)
-	slog.Info("router stopped",
-		"units", rtst.Units.Load(),
-		"noSplitter", rtst.NoSplitter.Load(),
-		"errorResponse", rtst.ErrorResponse.Load(),
-		"tokenTranscodePairs", tokens.Len())
-	slog.Info("splitters stopped",
-		"records", sst.Records.Load(),
-		"clamped", sst.Clamped.Load(),
-		"badLength", sst.BadLength.Load())
-	slog.Info("mirrors stopped",
-		"applied", mst.Applied.Load(),
-		"stale", mst.Stale.Load(),
-		"newRows", mst.NewRows.Load(),
-		"badDest", mst.BadDest.Load(),
-		"slotsFull", mst.SlotsFull.Load(),
-		"requeued", mst.Requeued.Load())
-	slog.Info("shards stopped",
-		"epochs", shst.Epochs.Load(),
-		"epochEmpty", shst.EpochEmpty.Load(),
-		"tickSkipped", shst.TickSkipped.Load(),
-		"batches", shst.Batches.Load(),
-		"abandoned", shst.Abandoned.Load(),
-		"flushTriggered", shst.FlushTriggered.Load(),
-		"flushCoalesced", shst.FlushCoalesced.Load())
-	slog.Info("writers stopped",
-		"batches", wst.Batches.Load(),
-		"rows", wst.Rows.Load(),
-		"failed", wst.Failed.Load(),
-		"unmatched", dst.Unmatched.Load())
-}
-
-// checkFields reports every field the schema names that no mapper produces,
-// so a misspelt field fails startup instead of silently never being written.
-// produced lists each mapper's fields.
-func checkFields(s *schema.Schema, produced ...[]string) error {
-	var (
-		known map[string]bool // every field some mapper produces
-		errs  []error         // one per unknown field
-	)
-
-	known = make(map[string]bool)
-	for _, fields := range produced {
-		for _, f := range fields {
-			known[f] = true
-		}
-	}
-	for _, d := range s.Dests {
-		for _, c := range d.Columns {
-			if c.Field != "" && !known[c.Field] {
-				errs = append(errs, fmt.Errorf("%s.%s: field %q is produced by no transcode", d.Table, c.Name, c.Field))
-			}
-		}
-	}
-	return errors.Join(errs...)
+	slog.Info("router counters",
+		"units", c.router.Units.Load(),
+		"noSplitter", c.router.NoSplitter.Load(),
+		"errorResponse", c.router.ErrorResponse.Load())
+	slog.Info("splitter counters",
+		"transcode", 7208,
+		"records", c.split7208.Records.Load(),
+		"clamped", c.split7208.Clamped.Load(),
+		"badLength", c.split7208.BadLength.Load(),
+		"outOfRange", c.split7208.OutOfRange.Load())
+	slog.Info("splitter counters",
+		"transcode", 7305,
+		"records", c.split7305.Records.Load(),
+		"badLength", c.split7305.BadLength.Load(),
+		"outOfRange", c.split7305.OutOfRange.Load())
+	slog.Info("mirror counters",
+		"applied", c.mirror.Applied.Load(),
+		"stale", c.mirror.Stale.Load(),
+		"newRows", c.mirror.NewRows.Load(),
+		"requeued", c.mirror.Requeued.Load())
+	slog.Info("shard counters",
+		"epochs", c.shard.Epochs.Load(),
+		"epochEmpty", c.shard.EpochEmpty.Load(),
+		"tickSkipped", c.shard.TickSkipped.Load(),
+		"batches", c.shard.Batches.Load(),
+		"abandoned", c.shard.Abandoned.Load(),
+		"flushTriggered", c.shard.FlushTriggered.Load(),
+		"flushCoalesced", c.shard.FlushCoalesced.Load())
+	slog.Info("writer counters",
+		"batches", c.writer.Batches.Load(),
+		"rows", c.writer.Rows.Load(),
+		"failed", c.writer.Failed.Load(),
+		"unmatched", c.db.Unmatched.Load())
 }

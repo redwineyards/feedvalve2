@@ -63,3 +63,9 @@ func (r *reader) pad(name string, n int) {
 	_ = name
 	r.off += n
 }
+
+// bytes reads len(dst) bytes, a CHAR array, into dst.
+func (r *reader) bytes(dst []byte) {
+	copy(dst, r.b[r.off:r.off+len(dst)])
+	r.off += len(dst)
+}

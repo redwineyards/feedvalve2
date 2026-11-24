@@ -7,21 +7,19 @@ import (
 
 	"feedvalve/internal/mirror"
 	"feedvalve/internal/router"
-	"feedvalve/internal/stats"
 	"feedvalve/internal/unpack"
 )
 
 // newRouter builds a router over n buffered shard queues.
-func newRouter(n int, splitters map[uint16]router.Splitter) (*router.Router, []chan mirror.Contribution, *stats.TokenCounts, *router.Stats) {
+func newRouter(n int, splitters map[uint16]router.Splitter) (*router.Router, []chan mirror.Contribution, *router.Stats) {
 	qs := make([]chan mirror.Contribution, n)
 	send := make([]chan<- mirror.Contribution, n)
 	for i := range qs {
 		qs[i] = make(chan mirror.Contribution, 4096)
 		send[i] = qs[i]
 	}
-	tokens := stats.NewTokenCounts(16)
 	st := new(router.Stats)
-	return router.New(splitters, send, tokens, st), qs, tokens, st
+	return router.New(splitters, send, st), qs, st
 }
 
 // drain returns everything queued on q so far, without blocking.
@@ -51,10 +49,10 @@ func shardOf(t *testing.T, r *router.Router, qs []chan mirror.Contribution, u mi
 }
 
 func TestSendDeliversContributionIntact(t *testing.T) {
-	r, qs, _, st := newRouter(4, nil)
-	u := mirror.Contribution{Seq: 9, Index: 2, Record: 1, Code: 7208, Dest: 2, Token: 4242, RowKey: -5}
-	u.Set(0, 11)
-	u.Set(mirror.MaxCols-1, -22)
+	r, qs, st := newRouter(4, nil)
+	u := mirror.Contribution{Seq: 9, Index: 2, Record: 1, Code: 7208, Token: 4242}
+	u.Quote.LastTradedPrice = 11
+	u.Quote.SellQuantity[4] = -22
 
 	r.Send(&u)
 
@@ -94,22 +92,9 @@ func TestSendShardSelection(t *testing.T) {
 			},
 		},
 		{
-			name:   "general units go to shard 0",
-			shards: 8,
-			units:  []mirror.Contribution{{General: true, Code: 6541}, {General: true, Code: 7306, Token: 999}},
-			check: func(t *testing.T, got []int) {
-				for _, s := range got {
-					if s != 0 {
-						t.Errorf("general units reached shards %v, want all 0", got)
-						return
-					}
-				}
-			},
-		},
-		{
 			name:   "one shard takes everything",
 			shards: 1,
-			units:  []mirror.Contribution{{Token: 1}, {Token: -7}, {Token: 1 << 30}, {General: true}},
+			units:  []mirror.Contribution{{Token: 1}, {Token: -7}, {Token: 1 << 30}},
 			check: func(t *testing.T, got []int) {
 				for _, s := range got {
 					if s != 0 {
@@ -122,7 +107,7 @@ func TestSendShardSelection(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, qs, _, _ := newRouter(tt.shards, nil)
+			r, qs, _ := newRouter(tt.shards, nil)
 			var got []int
 			for _, u := range tt.units {
 				got = append(got, shardOf(t, r, qs, u))
@@ -135,7 +120,7 @@ func TestSendShardSelection(t *testing.T) {
 // Exchange tokens come in contiguous blocks; the mix must still spread them.
 func TestSendSpreadsSequentialTokens(t *testing.T) {
 	const shards, tokens = 4, 1000
-	r, qs, _, _ := newRouter(shards, nil)
+	r, qs, _ := newRouter(shards, nil)
 	for tok := int32(40000); tok < 40000+tokens; tok++ {
 		r.Send(&mirror.Contribution{Token: tok, Code: 7208})
 	}
@@ -146,28 +131,16 @@ func TestSendSpreadsSequentialTokens(t *testing.T) {
 	}
 }
 
-func TestSendCountsTokens(t *testing.T) {
-	r, _, tokens, st := newRouter(4, nil)
+func TestSendCountsUnits(t *testing.T) {
+	r, _, st := newRouter(4, nil)
 	for _, u := range []mirror.Contribution{
 		{Token: 101, Code: 7208}, {Token: 101, Code: 7208}, {Token: 101, Code: 7201},
-		{Token: 102, Code: 7208}, {General: true, Code: 6541},
+		{Token: 102, Code: 7208},
 	} {
 		r.Send(&u)
 	}
-	for _, c := range []struct {
-		token int32
-		code  uint16
-		want  uint64
-	}{{101, 7208, 2}, {101, 7201, 1}, {102, 7208, 1}, {0, 6541, 0}} {
-		if got := tokens.Get(c.token, c.code); got != c.want {
-			t.Errorf("tokens.Get(%d, %d) = %d, want %d", c.token, c.code, got, c.want)
-		}
-	}
-	if got := tokens.Len(); got != 3 {
-		t.Errorf("tokens.Len() = %d, want 3 (general units are not counted)", got)
-	}
-	if got := st.Units.Load(); got != 5 {
-		t.Errorf("Units = %d, want 5", got)
+	if got := st.Units.Load(); got != 4 {
+		t.Errorf("Units = %d, want 4", got)
 	}
 }
 
@@ -208,7 +181,7 @@ func TestRoute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			calls = 0
-			r, qs, _, st := newRouter(4, map[uint16]router.Splitter{code: splitOut})
+			r, qs, st := newRouter(4, map[uint16]router.Splitter{code: splitOut})
 
 			r.Route(tt.p)
 
@@ -242,7 +215,7 @@ func TestRoute(t *testing.T) {
 
 func TestSendConcurrent(t *testing.T) {
 	const goroutines, perG = 4, 500
-	r, qs, tokens, st := newRouter(4, nil)
+	r, qs, st := newRouter(4, nil)
 	var wg sync.WaitGroup
 	for g := range goroutines {
 		wg.Add(1)
@@ -262,12 +235,9 @@ func TestSendConcurrent(t *testing.T) {
 	if total != goroutines*perG || st.Units.Load() != goroutines*perG {
 		t.Errorf("delivered %d, Units %d, want %d", total, st.Units.Load(), goroutines*perG)
 	}
-	if tokens.Len() != goroutines*perG {
-		t.Errorf("tokens.Len() = %d, want %d", tokens.Len(), goroutines*perG)
-	}
 }
 
-// The receive path must not allocate (ADR-006), and a Unit is ~520 bytes:
+// The receive path must not allocate (ADR-006), and a Contribution is ~390 bytes:
 // Route through a splitter must not move it to the heap.
 func TestRouteAllocatesNothing(t *testing.T) {
 	split := func(p *unpack.Packet, r *router.Router) {
@@ -275,7 +245,7 @@ func TestRouteAllocatesNothing(t *testing.T) {
 		u = mirror.Contribution{Seq: p.Seq, Code: p.Code, Token: 77}
 		r.Send(&u)
 	}
-	r, qs, _, _ := newRouter(4, map[uint16]router.Splitter{7208: split})
+	r, qs, _ := newRouter(4, map[uint16]router.Splitter{7208: split})
 	p := packet(7208, 0)
 	allocs := testing.AllocsPerRun(100, func() {
 		r.Route(p)

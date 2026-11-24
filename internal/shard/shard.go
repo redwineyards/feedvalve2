@@ -50,7 +50,7 @@ type Params struct {
 	Mirror       *mirror.Mirror             // owned by this shard alone
 	BatchQ       chan<- *mirror.Batch       // shared with every shard; capacity shards × MaxInFlight
 	Done         chan *mirror.Batch         // this shard's completions; capacity MaxInFlight
-	MaxBatch     int                        // rows per batch, across all destinations
+	MaxBatch     int                        // rows per batch
 	MaxInFlight  int                        // batches out at once
 	DrainTimeout time.Duration              // how long the shutdown flush may take
 	Stats        *Stats                     // shared counters
@@ -205,9 +205,8 @@ func (f *flusher) complete(b *mirror.Batch) {
 // whatever is left (HLD §11.4).
 func (f *flusher) shutdown() {
 	var (
-		timer   *time.Timer       // the drain deadline
-		pending [mirror.Dests]int // rows not written, per destination
-		left    int               // all rows not written
+		timer *time.Timer // the drain deadline
+		left  int         // rows not written
 	)
 
 	timer = time.NewTimer(f.p.DrainTimeout)
@@ -224,15 +223,10 @@ func (f *flusher) shutdown() {
 		case b := <-f.p.Done:
 			f.complete(b)
 		case <-timer.C:
-			pending = f.p.Mirror.Pending()
-			left = f.outRows
-			for _, n := range pending {
-				left += n
-			}
+			left = f.outRows + f.p.Mirror.Pending()
 			f.p.Stats.Abandoned.Add(uint64(left))
 			slog.Error("shutdown drain timed out, rows not written",
-				"shard", f.p.ID, "inFlight", f.outRows,
-				"dest0", pending[0], "dest1", pending[1], "dest2", pending[2])
+				"shard", f.p.ID, "inFlight", f.outRows, "pending", f.p.Mirror.Pending())
 			return
 		}
 	}

@@ -7,38 +7,6 @@ import (
 	"feedvalve/internal/mirror"
 )
 
-func TestContributionSet(t *testing.T) {
-	tests := []struct {
-		name     string
-		puts     [][2]int64 // (column, value) in call order
-		wantMask uint64
-		wantCols map[int]int64
-	}{
-		{"nothing set", nil, 0, map[int]int64{}},
-		{"first column", [][2]int64{{0, 7}}, 1, map[int]int64{0: 7}},
-		{"last column", [][2]int64{{mirror.MaxCols - 1, -9}}, 1 << 63, map[int]int64{63: -9}},
-		{"several columns", [][2]int64{{2, 20}, {5, 50}}, 1<<2 | 1<<5, map[int]int64{2: 20, 5: 50}},
-		{"same column twice, last value wins", [][2]int64{{3, 1}, {3, 2}}, 1 << 3, map[int]int64{3: 2}},
-		{"zero is a value, not unset", [][2]int64{{4, 0}}, 1 << 4, map[int]int64{4: 0}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var c mirror.Contribution
-			for _, p := range tt.puts {
-				c.Set(int(p[0]), p[1])
-			}
-			if c.Mask != tt.wantMask {
-				t.Errorf("Mask = %#x, want %#x", c.Mask, tt.wantMask)
-			}
-			for col, want := range tt.wantCols {
-				if c.Cols[col] != want {
-					t.Errorf("Cols[%d] = %d, want %d", col, c.Cols[col], want)
-				}
-			}
-		})
-	}
-}
-
 // at builds a contribution with the given arrival position.
 func at(seq uint64, index, record uint16) mirror.Contribution {
 	return mirror.Contribution{Seq: seq, Index: index, Record: record}
