@@ -1,0 +1,5 @@
+# Environment-specific runtime config; config.json.template is the checked-in reference.
+config.json
+
+# Local Claude Code state.
+.claude/
