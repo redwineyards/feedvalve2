@@ -93,7 +93,9 @@ func TestOnlyMBP(t *testing.T) {
 		{"two records, in order", onlyMBP(470, 2), []int32{1001, 1002}, [3]uint64{2, 0, 0}},
 		{"one record", onlyMBP(470, 1), []int32{1001}, [3]uint64{1, 0, 0}},
 		{"count clamped", onlyMBP(470, 9), []int32{1001, 1002}, [3]uint64{2, 1, 0}},
-		{"bad length sends nothing", onlyMBP(468, 2), nil, [3]uint64{0, 0, 1}},
+		{"short one-record message", onlyMBP(256, 1), []int32{1001}, [3]uint64{1, 0, 0}},
+		{"count above the records that fit", onlyMBP(256, 2), []int32{1001}, [3]uint64{1, 1, 0}},
+		{"too short for the count sends nothing", onlyMBP(41, 0), nil, [3]uint64{0, 0, 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
