@@ -34,8 +34,9 @@ const PasswordEnv = "FEEDVALVE_DB_PASSWORD"
 
 // Run starts FeedValve from the config file at cfgPath and keeps it running
 // until ctx is cancelled (returns nil) or something fatal happens. Errors are
-// returned rather than exiting, so cleanup always runs (HLD §6.10).
-func Run(ctx context.Context, cfgPath string) error {
+// returned rather than exiting, so cleanup always runs (HLD §6.10). lvl is
+// the log handler's level; Run sets it from the config's log.level.
+func Run(ctx context.Context, cfgPath string, lvl *slog.LevelVar) error {
 	var (
 		cfg       *config.Config // the loaded, validated config file
 		password  string         // Oracle password, from the environment only
@@ -50,6 +51,7 @@ func Run(ctx context.Context, cfgPath string) error {
 	if err != nil {
 		return err
 	}
+	lvl.Set(cfg.Log.Level)
 	password = os.Getenv(PasswordEnv)
 	target = db.Target{Host: cfg.DB.Host, Port: cfg.DB.Port, Service: cfg.DB.Service, User: cfg.DB.User}
 	dbTimeout = time.Duration(cfg.DB.ConnectTimeoutMs) * time.Millisecond
@@ -71,7 +73,7 @@ func Run(ctx context.Context, cfgPath string) error {
 // RunWithDB is Run for a caller that brings its own database connection, such
 // as a test: it loads the config at cfgPath but neither reads the password nor
 // opens Oracle. conn stays the caller's to close.
-func RunWithDB(ctx context.Context, cfgPath string, conn *sql.DB) error {
+func RunWithDB(ctx context.Context, cfgPath string, conn *sql.DB, lvl *slog.LevelVar) error {
 	var (
 		cfg *config.Config // the loaded, validated config file
 		err error          // result of loading it
@@ -82,6 +84,7 @@ func RunWithDB(ctx context.Context, cfgPath string, conn *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	lvl.Set(cfg.Log.Level)
 
 	// Logic.
 	runtime.GOMAXPROCS(cfg.GOMAXPROCS)

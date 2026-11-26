@@ -12,7 +12,9 @@
 package router
 
 import (
+	"context"
 	"encoding/binary"
+	"log/slog"
 	"sync/atomic"
 
 	"feedvalve/internal/mirror"
@@ -76,7 +78,10 @@ func (r *Router) Route(p *unpack.Packet) {
 }
 
 // Send puts c on the queue of the shard that owns its token, blocking while
-// that queue is full, and counts it.
+// that queue is full, and counts it. At debug level it also logs c's token,
+// transcode and shard. That write is synchronous on the receive path and can
+// break the NFR4 stall budget under burst, so debug is for troubleshooting
+// only; the Enabled check keeps Send allocation-free otherwise (ADR-006).
 func (r *Router) Send(c *mirror.Contribution) {
 	var (
 		shard int // index of the owning shard
@@ -85,6 +90,9 @@ func (r *Router) Send(c *mirror.Contribution) {
 	shard = int(mix(c.Token) % uint32(len(r.shards)))
 	r.shards[shard] <- *c
 	r.st.Units.Add(1)
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		slog.Debug("contribution queued", "token", c.Token, "code", c.Code, "shard", shard)
+	}
 }
 
 // mix scrambles a token so that shard = mix(token) % n spreads tokens evenly.

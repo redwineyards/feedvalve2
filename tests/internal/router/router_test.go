@@ -1,7 +1,10 @@
 package router_test
 
 import (
+	"bytes"
 	"encoding/binary"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -128,6 +131,43 @@ func TestSendSpreadsSequentialTokens(t *testing.T) {
 		if n := len(drain(q)); n < tokens*15/100 {
 			t.Errorf("shard %d got %d of %d units, want at least 15%%", i, n, tokens)
 		}
+	}
+}
+
+// At debug level each queued contribution is logged with its token, transcode
+// and shard; above it, nothing is.
+func TestSendLogsAtDebug(t *testing.T) {
+	tests := []struct {
+		name  string
+		level slog.Level
+		want  []string // substrings of the log; nil means no output at all
+	}{
+		{"debug logs token, code and shard", slog.LevelDebug, []string{"contribution queued", "token=4242", "code=7208", "shard="}},
+		{"info logs nothing", slog.LevelInfo, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: tt.level})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+			r, _, _ := newRouter(4, nil)
+
+			r.Send(&mirror.Contribution{Token: 4242, Code: 7208})
+
+			out := buf.String()
+			if tt.want == nil && out != "" {
+				t.Errorf("logged %q, want nothing", out)
+			}
+			for _, s := range tt.want {
+				if !strings.Contains(out, s) {
+					t.Errorf("log %q does not contain %q", out, s)
+				}
+			}
+			if tt.want != nil && strings.Count(out, "\n") != 1 {
+				t.Errorf("log %q, want exactly one line", out)
+			}
+		})
 	}
 }
 

@@ -139,7 +139,7 @@ func TestRunWithDBWrites7208(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- app.RunWithDB(ctx, cfg, conn) }()
+	go func() { done <- app.RunWithDB(ctx, cfg, conn, new(slog.LevelVar)) }()
 
 	sock, err := net.Dial("udp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
@@ -242,7 +242,7 @@ func TestRunWithDB7305FlushesImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- app.RunWithDB(ctx, cfg, conn) }()
+	go func() { done <- app.RunWithDB(ctx, cfg, conn, new(slog.LevelVar)) }()
 
 	sock, err := net.Dial("udp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {

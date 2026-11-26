@@ -20,6 +20,7 @@ func main() {
 		cfgPath *string            // path to the JSON config file, from -config
 		ctx     context.Context    // cancelled on SIGINT or SIGTERM
 		stop    context.CancelFunc // stops listening for those signals
+		lvl     *slog.LevelVar     // the log level; info until app.Run applies log.level
 		err     error              // why FeedValve stopped, if it failed
 	)
 
@@ -28,11 +29,12 @@ func main() {
 	flag.Parse()
 
 	// Allocations.
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	lvl = new(slog.LevelVar)
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
 
 	// Logic.
 	ctx, stop = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	err = app.Run(ctx, *cfgPath)
+	err = app.Run(ctx, *cfgPath, lvl)
 	stop()
 	if err != nil {
 		slog.Error("feedvalve stopped", "err", err)

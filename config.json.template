@@ -30,5 +30,8 @@
   },
   "stats": {
     "intervalMs": 60000
+  },
+  "log": {
+    "level": "info"
   }
 }

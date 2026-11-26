@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 )
 
@@ -27,6 +28,16 @@ type Config struct {
 	Shards     Shards   `json:"shards"`
 	Flush      Flush    `json:"flush"`
 	Stats      Stats    `json:"stats"`
+	Log        Log      `json:"log"`
+}
+
+// Log configures logging.
+type Log struct {
+	// Level is the lowest level logged: "debug", "info" (the default),
+	// "warn" or "error", in any case. At debug, every contribution queued to
+	// a shard is logged; that is for troubleshooting only, as it writes
+	// synchronously on the receive path.
+	Level slog.Level `json:"level"`
 }
 
 // Stats configures the operational counters (FR10).
@@ -137,6 +148,7 @@ func Load(path string) (*Config, error) {
 		Shards:   Shards{Count: defaultShards, QueueCapacity: defaultShardQueueCap},
 		Flush:    Flush{WindowMs: defaultWindowMs, MaxBatchSize: defaultMaxBatchSize, MaxInFlightPerShard: defaultMaxInFlight, DrainTimeoutMs: defaultDrainTimeoutMs, NonRateLimited: []int{7305}},
 		Stats:    Stats{IntervalMs: defaultStatsIntervalMs},
+		Log:      Log{Level: slog.LevelInfo},
 	}
 
 	// Logic.

@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -33,6 +34,7 @@ func TestLoadValidAppliesDefaults(t *testing.T) {
 		Shards:     config.Shards{Count: 4, QueueCapacity: 4096},
 		Flush:      config.Flush{WindowMs: 200, MaxBatchSize: 1000, MaxInFlightPerShard: 2, DrainTimeoutMs: 10000, NonRateLimited: []int{7305}},
 		Stats:      config.Stats{IntervalMs: 60000},
+		Log:        config.Log{Level: slog.LevelInfo},
 	}
 	if !reflect.DeepEqual(*cfg, want) {
 		t.Errorf("got %+v, want %+v", *cfg, want)
@@ -40,7 +42,7 @@ func TestLoadValidAppliesDefaults(t *testing.T) {
 }
 
 func TestLoadExplicitValuesOverrideDefaults(t *testing.T) {
-	p := writeFile(t, `{"gomaxprocs": 8, "db": {"host": "h", "port": 1522, "service": "s", "user": "u", "connectTimeoutMs": 3000, "writers": 7, "commitTimeoutMs": 4000}, "receiver": {"listenAddr": "127.0.0.1:9000", "socketBufferBytes": 1024, "queueCapacity": 10}, "unpack": {"workers": 6}, "shards": {"count": 8, "queueCapacity": 20}, "flush": {"windowMs": 50, "maxBatchSize": 250, "maxInFlightPerShard": 3, "drainTimeoutMs": 2000, "nonRateLimited": [6511, 6531]}, "stats": {"intervalMs": 5000}}`)
+	p := writeFile(t, `{"gomaxprocs": 8, "db": {"host": "h", "port": 1522, "service": "s", "user": "u", "connectTimeoutMs": 3000, "writers": 7, "commitTimeoutMs": 4000}, "receiver": {"listenAddr": "127.0.0.1:9000", "socketBufferBytes": 1024, "queueCapacity": 10}, "unpack": {"workers": 6}, "shards": {"count": 8, "queueCapacity": 20}, "flush": {"windowMs": 50, "maxBatchSize": 250, "maxInFlightPerShard": 3, "drainTimeoutMs": 2000, "nonRateLimited": [6511, 6531]}, "stats": {"intervalMs": 5000}, "log": {"level": "debug"}}`)
 	cfg, err := config.Load(p)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -53,6 +55,7 @@ func TestLoadExplicitValuesOverrideDefaults(t *testing.T) {
 		Shards:     config.Shards{Count: 8, QueueCapacity: 20},
 		Flush:      config.Flush{WindowMs: 50, MaxBatchSize: 250, MaxInFlightPerShard: 3, DrainTimeoutMs: 2000, NonRateLimited: []int{6511, 6531}},
 		Stats:      config.Stats{IntervalMs: 5000},
+		Log:        config.Log{Level: slog.LevelDebug},
 	}
 	if !reflect.DeepEqual(*cfg, want) {
 		t.Errorf("got %+v, want %+v", *cfg, want)
@@ -113,6 +116,7 @@ func TestLoadErrors(t *testing.T) {
 		{"schema file is no longer a setting", `{"gomaxprocs": 4, "db": {"host": "h", "service": "s", "user": "u", "schemaFile": "schema.json"}, "receiver": {"listenAddr": ":1"}}`, []string{"schemaFile"}},
 		{"commit timeout zero", `{"gomaxprocs": 4, "db": {"host": "h", "service": "s", "user": "u", "commitTimeoutMs": 0}, "receiver": {"listenAddr": ":1"}}`, []string{"db.commitTimeoutMs"}},
 		{"stats interval zero", `{"gomaxprocs": 4, "db": {"host": "h", "service": "s", "user": "u"}, "receiver": {"listenAddr": ":1"}, "stats": {"intervalMs": 0}}`, []string{"stats.intervalMs"}},
+		{"unknown log level", `{"gomaxprocs": 4, "db": {"host": "h", "service": "s", "user": "u"}, "receiver": {"listenAddr": ":1"}, "log": {"level": "loud"}}`, []string{"loud"}},
 		{"all faults reported", `{"db": {}}`, []string{"gomaxprocs", "db.host", "db.service", "db.user", "receiver.listenAddr"}},
 	}
 	for _, tt := range tests {
