@@ -3,7 +3,8 @@
 // since 1980. Turning a record into table values is a later stage's job.
 //
 // Every decoder reads field by field through a big-endian cursor and checks
-// the message length first, so no read can run past the message.
+// the message length first, so no read can run past the message: 7305 must be
+// exactly its declared length, and 7208 only has the records that fit read.
 package decode
 
 import (
@@ -12,7 +13,8 @@ import (
 )
 
 // OnlyMBPLen is the declared length of a 7208 message, header included
-// (bible §4.8): 40 + 2 + 2×214.
+// (bible §4.8): 40 + 2 + 2×214. It is the full two-record layout; a 7208 may
+// arrive shorter (see DecodeOnlyMBP).
 const OnlyMBPLen = 470
 
 const (
@@ -33,7 +35,9 @@ var (
 	_ [(onlyMBPRecOff + onlyMBPMaxRecs*onlyMBPRecLen) - OnlyMBPLen]struct{}
 )
 
-// ErrBadLength is returned when a message is not its declared length.
+// ErrBadLength is returned when a message's length cannot be decoded: a 7305
+// that is not its declared length, or a 7208 too short for its header and
+// NoOfRecords.
 var ErrBadLength = errors.New("decode: message length differs from declared")
 
 // MBPLevel is one MBP_INFORMATION entry: one price level of the book.
@@ -87,18 +91,23 @@ type OnlyMBP struct {
 
 // DecodeOnlyMBP parses the 7208 message m, from the header onward, into out
 // and returns how many records it holds. NoOfRecords is clamped to [0, 2]
-// (bible §4.8) and clamped reports whether that was needed. A message that
-// is not exactly OnlyMBPLen bytes returns ErrBadLength.
+// (bible §4.8) and to the whole records m holds; clamped reports whether
+// either was needed, and a partial record is never decoded. Despite bible
+// §4.8's "always 470 bytes", the exchange sends a one-record 7208 short, at
+// 40 + 2 + 214 = 256 bytes, so any length is accepted. Only a message too
+// short for the header and NoOfRecords returns ErrBadLength.
 func DecodeOnlyMBP(m []byte, out *[onlyMBPMaxRecs]OnlyMBP) (n int, clamped bool, err error) {
 	var (
 		logTime int32  // header LogTime, copied into every record
 		bcSeqNo int32  // header BCSeqNo, copied into every record
+		fit     int    // whole records m has room for
 		r       reader // cursor over the current record
 	)
 
-	if len(m) != OnlyMBPLen {
+	if len(m) < onlyMBPRecOff {
 		return 0, false, ErrBadLength
 	}
+	fit = (len(m) - onlyMBPRecOff) / onlyMBPRecLen
 	logTime = int32(binary.BigEndian.Uint32(m[logTimeOff:]))
 	bcSeqNo = int32(binary.BigEndian.Uint32(m[bcSeqNoOff:]))
 	n = int(int16(binary.BigEndian.Uint16(m[onlyMBPCountOff:])))
@@ -107,6 +116,9 @@ func DecodeOnlyMBP(m []byte, out *[onlyMBPMaxRecs]OnlyMBP) (n int, clamped bool,
 	}
 	if n > onlyMBPMaxRecs {
 		n, clamped = onlyMBPMaxRecs, true
+	}
+	if n > fit {
+		n, clamped = fit, true
 	}
 
 	for i := range n {

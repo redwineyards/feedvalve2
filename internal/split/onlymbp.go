@@ -17,8 +17,8 @@ import (
 // to read concurrently.
 type Stats struct {
 	Records    atomic.Uint64 // records sent as contributions
-	Clamped    atomic.Uint64 // messages whose record count had to be clamped
-	BadLength  atomic.Uint64 // messages not their declared length; dropped
+	Clamped    atomic.Uint64 // messages whose record count had to be clamped, to the array bound or to the records present
+	BadLength  atomic.Uint64 // messages too short to decode (decode.ErrBadLength); dropped
 	OutOfRange atomic.Uint64 // records with a value too large for its column; dropped
 }
 
@@ -28,8 +28,9 @@ const maxNumber10 = 9_999_999_999
 
 // OnlyMBP returns the 7208 Splitter: it decodes the message and sends one
 // contribution per record, in order, keyed by the record's token. A message
-// of the wrong length is counted and dropped (HLD §6.4); a clamped record
-// count is counted and logged. A record with a value its column cannot hold
+// may be shorter than 470 bytes; only one too short for its header and record
+// count is counted and dropped (HLD §6.4). A record count clamped to the
+// array bound or to the records present is counted and logged. A record with a value its column cannot hold
 // is counted and dropped, so Oracle never rejects a row and a failed batch
 // only ever means the database itself failed.
 func OnlyMBP(st *Stats) router.Splitter {
@@ -37,7 +38,7 @@ func OnlyMBP(st *Stats) router.Splitter {
 		var (
 			recs    [2]decode.OnlyMBP   // the message's records, on the stack
 			n       int                 // records in the message
-			clamped bool                // whether NoOfRecords was out of range
+			clamped bool                // whether NoOfRecords was out of range or beyond the records present
 			c       mirror.Contribution // the contribution being sent
 			bad     string              // the field out of range, if any
 			badVal  float64             // its value
@@ -47,7 +48,7 @@ func OnlyMBP(st *Stats) router.Splitter {
 		n, clamped, err = decode.DecodeOnlyMBP(p.Data[:p.Len], &recs)
 		if err != nil {
 			st.BadLength.Add(1)
-			slog.Warn("7208 dropped", "seq", p.Seq, "index", p.Index, "len", p.Len, "want", decode.OnlyMBPLen, "err", err)
+			slog.Warn("7208 dropped: shorter than header and record count", "seq", p.Seq, "index", p.Index, "len", p.Len, "err", err)
 			return
 		}
 		if clamped {

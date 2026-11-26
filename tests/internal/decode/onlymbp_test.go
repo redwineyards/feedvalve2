@@ -85,17 +85,20 @@ func put(m []byte, rec int, r decode.OnlyMBP) {
 }
 
 // message builds a 7208 message of length size with NoOfRecords count and
-// both record slots filled from sample.
+// every record slot that fits whole filled from sample. A size too small for
+// the header and count is left all zero.
 func message(size int, count int16) []byte {
 	m := make([]byte, size)
+	if size < 42 {
+		return m
+	}
 	binary.BigEndian.PutUint32(m[4:], 1400000000) // LogTime
 	binary.BigEndian.PutUint16(m[10:], 7208)      // TransactionCode
 	binary.BigEndian.PutUint32(m[14:], 777)       // BCSeqNo
 	binary.BigEndian.PutUint16(m[38:], uint16(size))
 	binary.BigEndian.PutUint16(m[40:], uint16(count))
-	if size >= decode.OnlyMBPLen {
-		put(m, 0, sample(0))
-		put(m, 1, sample(1))
+	for i := 0; i < 2 && 42+(i+1)*214 <= size; i++ {
+		put(m, i, sample(i))
 	}
 	return m
 }
@@ -113,8 +116,13 @@ func TestDecodeOnlyMBP(t *testing.T) {
 		{"zero records", message(470, 0), 0, false, nil},
 		{"count above the array bound", message(470, 3), 2, true, nil},
 		{"negative count", message(470, -1), 0, true, nil},
-		{"one byte short", message(469, 2), 0, false, decode.ErrBadLength},
-		{"one byte long", message(471, 2), 0, false, decode.ErrBadLength},
+		// The exchange sends a one-record 7208 short: 40 + 2 + 214 bytes.
+		{"one record, short message", message(256, 1), 1, false, nil},
+		{"header and count only", message(42, 0), 0, false, nil},
+		{"count above the records that fit", message(256, 2), 1, true, nil},
+		{"partial second record is not decoded", message(469, 2), 1, true, nil},
+		{"trailing bytes ignored", message(471, 2), 2, false, nil},
+		{"too short for the count", message(41, 0), 0, false, decode.ErrBadLength},
 		{"empty", nil, 0, false, decode.ErrBadLength},
 	}
 	for _, tt := range tests {
